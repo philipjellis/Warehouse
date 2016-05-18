@@ -12,6 +12,7 @@ import xlwt
 from getFlatRecs import xyz99
 import pyodbc
 from ToDo import ToDoManager
+from pubsub import pub
 #from utilities import ConnString,getColHeads
 
 class IndividualBenefit(wx.Panel):
@@ -28,6 +29,10 @@ class IndividualBenefit(wx.Panel):
         #
         #set up all the buttons and labels and whatnot
         #
+	self.rbProd = wx.RadioButton(self,-1,'Production',style=wx.RB_GROUP)
+	self.rbTest = wx.RadioButton(self,-1,'Test')
+	self.Bind(wx.EVT_RADIOBUTTON, self.ProdTest, self.rbProd)
+	self.Bind(wx.EVT_RADIOBUTTON, self.ProdTest, self.rbTest)
         lab1=wx.StaticText(self, -1, "Please enter socials, separated by spaces")
         self.intxt = wx.TextCtrl(self, -1, value="", size=(300,20)) 
         butnRetr=wx.Button(self, -1, "Retrieve")
@@ -85,9 +90,10 @@ class IndividualBenefit(wx.Panel):
         #
         #now put them all into the screen with BoxSizers
         #
-        h1=wx.BoxSizer(wx.HORIZONTAL) # first box has the social entry field
-        h1.Add(lab1,0, wx.ALIGN_LEFT|wx.ALL, 4)
-        h1.Add(self.intxt,0, wx.ALIGN_LEFT|wx.ALL, 4)
+        h1=wx.BoxSizer(wx.HORIZONTAL) # first box has the social entry field and radio buttons for live/test
+	for thing in [self.rbProd,self.rbTest,lab1,self.intxt]:
+	    h1.Add(thing,0, wx.ALIGN_LEFT|wx.ALL, 4)
+        #h1.Add(self.intxt,0, wx.ALIGN_LEFT|wx.ALL, 4)
         self.v1=wx.BoxSizer(wx.VERTICAL)
         h2=wx.BoxSizer(wx.HORIZONTAL) # for the buttons
         h2.Add(SSBoxSizer, 0, wx.ALL, 10)
@@ -105,10 +111,19 @@ class IndividualBenefit(wx.Panel):
         self.subPans.Clear(True) # true will destroy all the children windows, poor things
         return
 
-    def TestMe(self,Event):
-        print 'called me'
-        self.subPans.Clear(True) #delete_windows=True)
-        return
+#    def TestMe(self,Event):
+#        print 'called me'
+#        self.subPans.Clear(True) #delete_windows=True)
+#        return
+
+    def ProdTest(self,Event):
+	if self.rbProd.GetValue() == True: #then production has been selected
+	    self.Production = 'Prod'
+	else:
+	    self.Production = 'Test'
+	pub.sendMessage('Production',arg1 = self.Production)
+	
+            
 
     def Tasks(self,Event):
         self.todolist = ToDoManager(self.bigPanel, self)        
@@ -283,7 +298,8 @@ class IndividualBenefit(wx.Panel):
             htmlText=htmlString() # set up an instance of the html string
             EEData = xyz99(None,'ssn',None,None,social)
             for i,j in zip(EEData.Fields, EEData.Types):
-                print i,j
+		pass
+               # print i,j
             EEHTML = HTML.table([['No employee found'],['No data returned']])
             if len(EEData.OutData) > 0:
                 self.EEDataXL =  [(field,data) for field,data in zip(EEData.Fields , EEData.OutData[0])]

@@ -118,6 +118,7 @@ def Update (sql, dat, report=True):
     """
     errStrin = 'sql-->'+sql+'\n'+'data-->'+str(dat)+'\n'
     SeriousError = False
+    #print cnxn.getinfo(pyodbc.SQL_DATABASE_NAME)
     try:
         cursor.execute(sql,dat)
     except pyodbc.Error as er:
@@ -171,6 +172,9 @@ def dbprint(s):
 class ProValLoad:
     
     def __init__(self, parent, fn, PlanId, EmployerId):
+	global cursor, cnxn
+	cnxn = accP2()
+	cursor = cnxn.cursor()
         dbprint ('starting')
         self.errfile=fn[:-4]+'.txt'
         errf.openf(self.errfile,'step1')
@@ -937,6 +941,7 @@ class ProValLoad:
 debug = False
 cnxn = accP2()
 cursor = cnxn.cursor()
+#print 'begin',cnxn.getinfo(pyodbc.SQL_DATABASE_NAME)
 errf = processErr()
 sql = 'select cdescription, ccode from tbcodes where cannuals = 1'
 annCodes = cursor.execute(sql).fetchall()

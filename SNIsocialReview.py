@@ -7,7 +7,7 @@ from utilities import sniCn, getColHeads
 from copy import copy
 from collections import OrderedDict
 import HTML
-from cdecimal import Decimal
+from decimal import Decimal
 import os
 
 def writeOut(social,text, prefix):

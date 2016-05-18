@@ -11,8 +11,10 @@ from ImportPage import Importer
 from DatAirPage import DatAir
 from SNIPage import SNI
 from LCRAPage import LCRA
+from NACOPage import Naco
 from DataDickPage import DataDick
 import encodings
+from pubsub import pub
 
 class MainFrame(wx.Frame):
     def __init__(self):
@@ -22,46 +24,62 @@ class MainFrame(wx.Frame):
         self.CreateStatusBar(style=0)
 #                          
         # Here we create a panel and a notebook on the panel
-        p = wx.Panel(self)
-        nb = wx.Notebook(p)
+        self.p = wx.Panel(self)
+        nb = wx.Notebook(self.p)
         
         # create the page windows as children of the notebook
-        P1_IB = IndividualBenefit(nb)
-        P2_Edit = Editor(nb)
-        P3_Ex = Extractor(nb)
-        P4_Imp = Importer(nb)
-        P5_DatAir= DatAir(nb)
-        P6_SNI = SNI(nb)
-        P7_LCRA = LCRA(nb, self) #, self.status)
-        P8_DD = DataDick(nb)
+        self.P1_IB = IndividualBenefit(nb)
+        self.P2_Edit = Editor(nb)
+        self.P3_Ex = Extractor(nb)
+        self.P4_Imp = Importer(nb)
+        self.P5_DatAir= DatAir(nb)
+        self.P6_SNI = SNI(nb)
+        self.P7_LCRA = LCRA(nb, self) #, self.status)
+	self.P8_NACO = Naco(nb, self)
+        self.P9_DD = DataDick(nb)
         
         #Publisher.subscribe(self.change_statusbar, 'change_statusbar')
         # add the pages to the notebook with the label to show on the tab
-        nb.AddPage(P1_IB, "Home: IB, Participant Data and TaskList")
-        nb.AddPage(P2_Edit, "Edit Participant Details")
-        nb.AddPage(P3_Ex, "Extract Records")
-        nb.AddPage(P4_Imp, "Import and Update Records")
-        nb.AddPage(P5_DatAir, "Datair Conversion")
-        nb.AddPage(P6_SNI, "SNI Monthly Load")
-        nb.AddPage(P7_LCRA, "LCRA")
-        nb.AddPage(P8_DD, "Data Dictionary")
+        nb.AddPage(self.P1_IB, "Home: IB, Participant Data and TaskList")
+        nb.AddPage(self.P2_Edit, "Edit Participant Details")
+        nb.AddPage(self.P3_Ex, "Extract Records")
+        nb.AddPage(self.P4_Imp, "Import and Update Records")
+        nb.AddPage(self.P5_DatAir, "Datair Conversion")
+        nb.AddPage(self.P6_SNI, "SNI Monthly Load")
+        nb.AddPage(self.P7_LCRA, "LCRA")
+	nb.AddPage(self.P8_NACO, "Naco")
+        nb.AddPage(self.P9_DD, "Data Dictionary")
 
-        if test :
-            bgCol =  "#FFEBCD" #LightBrown #
-          #if test version then set background colour 
-            P1_IB.SetBackgroundColour(bgCol)
-            P2_Edit.SetBackgroundColour(bgCol)
-            P3_Ex.SetBackgroundColour(bgCol)
-            P4_Imp.SetBackgroundColour(bgCol)
-            P5_DatAir.SetBackgroundColour(bgCol)
-            P6_SNI.SetBackgroundColour(bgCol)
-            P7_LCRA.SetBackgroundColour(bgCol)
-            P8_DD.SetBackgroundColour(bgCol)
+        pub.subscribe(self.listener2,'Production')
+        pub.sendMessage('Production',arg1='Prod')
+
+        #self.setbg(self.Production)
         # finally, put the notebook in a sizer for the panel to manage
         # the layout
         sizer = wx.BoxSizer()
         sizer.Add(nb, 1, wx.EXPAND)
-        p.SetSizerAndFit(sizer)
+        self.p.SetSizerAndFit(sizer)
+
+    def listener2(self,arg1):
+	#print 'listener 2 got ',arg1
+	#prod_flag = arg1
+        self.setbg(arg1)	
+
+    def setbg(self,prod_flag):
+	if prod_flag == 'Prod':
+	    bgCol = "#F0F0F0"
+	else:
+	    bgCol = "#FFEBCD"
+        self.P1_IB.SetBackgroundColour(bgCol)
+        self.P2_Edit.SetBackgroundColour(bgCol)
+        self.P3_Ex.SetBackgroundColour(bgCol)
+        self.P4_Imp.SetBackgroundColour(bgCol)
+        #self.P5_DatAir.SetBackgroundColour(bgCol)
+        #self.P6_SNI.SetBackgroundColour(bgCol)
+        #self.P7_LCRA.SetBackgroundColour(bgCol)
+	self.P8_NACO.SetBackgroundColour(bgCol)
+        #self.P9_DD.SetBackgroundColour(bgCol)
+	self.p.Refresh()
 
     def change_statusbar(self, m):
         self.SetStatusText(m)

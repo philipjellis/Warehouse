@@ -3,16 +3,36 @@ import wx.html
 import  wx.lib.masked as masked
 import os
 from datetime import date, datetime, timedelta
-from utilities import ConnString, getColHeads
+from utilities import ConnString, getColHeads, HTMLWindow
 from editscreen import EditRecord
 import pyodbc
 from rw_utilities import readXLList, writeXL
 from collections import OrderedDict
 from wx.lib.dialogs import ScrolledMessageDialog as sm
+from dateutil import relativedelta as rd
+import string
+import HTML 
 
 #utilities
 class CursorConnection (object):
     pass
+
+conn = pyodbc.connect(ConnString(11))
+cursor = conn.cursor()
+
+
+class Status:
+    """ There are two percentage fields for status
+    a) percentcomplete - this is the percent of the schedule you can burn up and still be considered ok for this
+    step
+    b) percentlate - this is the percentage that will count as behind schedule
+    """
+    sql = 'select sstatusdescription, spercentcomplete, spercentlate from status'
+    cursor.execute(sql)
+    data = cursor.fetchall()
+    onsched_dick = dict((i.sstatusdescription,i.spercentcomplete) for i in data)
+    late_dick =  dict((i.sstatusdescription,i.spercentlate) for i in data)
+    statlist = [i.sstatusdescription for i in data]
 
 def sqlUpd (table, colNames, keyColNames):
     sqlUpd = "update {0} set ".format(table)
@@ -76,10 +96,12 @@ def pydate2wxdate(d):
     try:
         test = d.year
     except:
-        d = datetime.now().date()
-    tt = d.timetuple()
-    dmy = (tt[2], tt[1]-1, tt[0])
-    return wx.DateTimeFromDMY(*dmy)
+        d = None
+    if d:
+        tt = d.timetuple()
+        dmy = (tt[2], tt[1]-1, tt[0])
+        return wx.DateTimeFromDMY(*dmy)
+    return wx.DateTime()
 
 def wxdate2pydate(d):
     assert isinstance(d, wx.DateTime)
@@ -101,7 +123,8 @@ class Widget(object):
         elif typ == 'c': # choice
             self.control = wx.Choice(parent,-1,(85,18),choices = self.choices)
         elif typ == 'd': # date
-            self.control = wx.GenericDatePickerCtrl(parent, -1, size = (120,-1))
+            self.control = wx.GenericDatePickerCtrl(parent, -1, size = (120,-1),
+			    style=wx.DP_ALLOWNONE)
         elif typ == 'i': # integer
             self.control = masked.NumCtrl(parent, -1,size=size,
                                           value = 0, 
@@ -120,7 +143,11 @@ class Widget(object):
         if self.typ == 't':
             self.control.SetValue(str(self.data))
         elif self.typ == 'i':
-            self.control.SetValue(self.data)        
+	    if self.data:
+		ins_data = self.data
+	    else:
+		ins_data = 0
+            self.control.SetValue(ins_data)        
         elif self.typ == 'c':
             if self.data:
                 self.control.SetStringSelection(self.data)
@@ -134,6 +161,8 @@ class Widget(object):
             self.data = self.control.GetValue()
             if self.name == 'Task Description':
                 self.data = self.data[:50]
+	    if self.typ == 't':
+		self.data = filter(lambda x: x in string.printable, self.data)
         elif self.typ == 'c':
             self.data = self.control.GetStringSelection()
             #print 'got choice',self.print_data()
@@ -151,18 +180,33 @@ class Task (object):
 
     def __init__(self, cc, user, tclient=None, tproject = None, taskdata=None):
         self.cols = ['tclient','tproject','powner','ttaskid','tdescription','tresponsible',
-                     'tdue','tstarted','texpected','tprogress','tstatus']
+                     'tdue','tstarted','texpected','tstatus','tbudgetdays','tcomments']
         self.keycols = ['tclient','tproject','ttaskid']
-        self.datacols = ['tdescription','tresponsible','tdue','tstarted','texpected','tprogress','tstatus']
+        self.datacols = ['tdescription','tresponsible','tdue','tstarted','texpected','tcomments','tstatus']
         self.tasktablecols = self.keycols + self.datacols
         self.heads =[i[1:].title() for i in self.cols]
         self.cc = cc
-        self.user = user
+	self.user = user
         if taskdata:
             for i in self.cols:
-                setattr(self,i,getattr(taskdata,i))
+                setattr(self,i,getattr(taskdata,i,None))
         else:
             self.create(tclient, tproject)
+	self.LATE = '#FF3333' # red
+	self.PROBABLY_LATE = '#FF8433' #orange
+	self.BEHIND = '#FFFF00' # yellow
+	self.ONHOLD = '#7FCBC9' # light blue
+	self.NOBUDGET = '#83541E' #brown
+	self.NODUE = '#CCFFCC' # light green
+	self.LATEtxt = 'Late'
+	self.PROBABLY_LATEtxt = 'Behind Schedule'
+	self.BEHINDtxt = 'Behind Schedule'
+	self.ONHOLDtxt = 'On Hold'
+	self.NOBUDGETtxt = 'No budget'
+	self.NODUEtxt = 'No due date'
+        self.ONHOLDSTATUS = '0 On Hold'
+	self.COMPLETESTATUS = '6 Complete'
+	self.CANCELLEDSTATUS = '7 Cancelled'
 
     def create(self, tclient, tproject):
         for i in self.cols:
@@ -173,6 +217,55 @@ class Task (object):
         self.tproject = tproject
         self.ttaskid = self.max_task()
         self.tstatus = '1 Not Started'
+	self.tbudgetdays = 0
+
+    def return_constants(self):
+	return [(self.LATE, self.LATEtxt),
+		(self.PROBABLY_LATE, self.PROBABLY_LATEtxt),
+		(self.BEHIND, self.PROBABLY_LATEtxt),
+		(self.ONHOLD, self.ONHOLDtxt),
+		(self.NOBUDGET, self.NOBUDGETtxt),
+		(self.NODUE, self.NODUEtxt)
+		]
+
+    def colour(self):
+	pctcomplete = 1.0 - Status.onsched_dick[self.tstatus] / 100.0
+	pctlate = 1.0 - Status.late_dick[self.tstatus] / 100.0
+	today = date.today()
+	""" You have to think about this order:
+	a) if it is complete or cancelled - just quit
+	b) if it HAS a due date and this is before today - return LATE
+	c) if it is ONHOLD return ONHOLD - this takes priority over the next one
+	d) if it does not have a due date - return NODUE 
+	e) once you have got here just calculate the categories of late and 
+	f) if it is late return late
+	g) else return nothing
+	"""
+	if self.tstatus in [self.COMPLETESTATUS, self.CANCELLEDSTATUS]:
+	    return None, None
+        if self.tdue:
+	    if self.tdue < today:
+	        return self.LATE, self.LATEtxt
+        if self.tstatus == self.ONHOLDSTATUS:
+            return self.ONHOLD, self.ONHOLDtxt
+	if not self.tdue:
+	    return self.NODUE, self.NODUEtxt
+	if self.tbudgetdays:
+	    well_behind = (today + rd.relativedelta(days = int(pctlate * self.tbudgetdays))) > self.tdue
+	    if well_behind:
+		return self.PROBABLY_LATE, self.PROBABLY_LATEtxt
+	    behind = (today + rd.relativedelta(days = int(pctcomplete * self.tbudgetdays))) > self.tdue
+	    if behind:
+		return self.BEHIND, self.BEHINDtxt
+	else:
+	    return self.NOBUDGET, self.NOBUDGETtxt
+        return None, None
+
+    def duedateout(self):
+	try:
+            return self.tdue.strftime("%m-%d-%Y")
+        except:
+	    return 'N/A'
 
     def max_task(self):
         sql = 'select max(ttaskid) from tasks where tclient = ? and tproject = ?'
@@ -215,7 +308,7 @@ class Task (object):
 
     def copy_data(self):
         self.old_data = OrderedDict((col, getattr(self,col)) for col in self.cols)
-        print'old data', self.old_data
+        #print'old data', self.old_data
         
     def write_history(self):
         # first identify the changed data columns
@@ -236,7 +329,8 @@ class Task (object):
                 #print msg
                 self.cc.conn.commit()
         else:
-            print 'nothing changed'
+            pass
+            #print 'nothing changed'
 
     def printme(self,msg):
         print 'task ', msg
@@ -258,15 +352,16 @@ class TaskDialog(wx.Dialog):
         self.widgets['tdue'] = Widget(self,'Due Date','d', dataval = t.tdue)
         self.widgets['tstarted'] = Widget(self,'Started','d', dataval = t.tstarted)		
         self.widgets['texpected'] = Widget(self,'Expected Date','d', dataval = t.texpected)        
-        self.widgets['tprogress'] = Widget(self,'Progress','t',dataval = t.tprogress)        
+        self.widgets['tcomments'] = Widget(self,'Comments','t',dataval = t.tcomments)        
         self.widgets['tstatus'] = Widget(self,'Status','c',choices = sts, dataval = t.tstatus)        		
+        self.widgets['tbudgetdays'] = Widget(self,'Budget Days','i', dataval = t.tbudgetdays)        		
         # buttons
         save = wx.Button(self,wx.ID_OK)
         save.SetDefault()
         cancel = wx.Button(self,wx.ID_CANCEL)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
-        fgs = wx.FlexGridSizer(10,2,5,5)
+        fgs = wx.FlexGridSizer(11,2,5,5)
         for widget in self.widgets.values():
             fgs.Add(widget.label,0,wx.ALIGN_RIGHT)
             fgs.Add(widget.control,0,wx.LEFT)
@@ -327,6 +422,13 @@ class TaskList (object):
                     vals.append(v)
                 else:
                     pass
+	    elif (k == 'tduein100'):
+		if v:
+	            due_date = date.today() + rd.relativedelta(days = 100)
+		    ks.append(' tdue < ? ')
+		    vals.append(due_date)
+		else:
+	            pass
             else:
                 if v:
                     ks.append(k + ' = ?')
@@ -336,6 +438,7 @@ class TaskList (object):
         #print 'sql',sql
         #print 'vals', [str(i) for i in vals]
         self.cc.cursor.execute(sql,vals)
+
         self.data = [Task(self.cc, self.parent.userdefault, self.tclient, self.tproject, taskdata = i) for i in self.cc.cursor.fetchall()]
 
 
@@ -390,25 +493,28 @@ class ToDoManager(wx.Panel):
         self.tproject = None #self.projects(self.tclient)[0]
         self.tprojectlist = self.projects(self.tclient)
         self.tstatus = None #self.statuses()[0]
-        self.userdefault = os.environ['USERNAME']        
+        self.userdefault = os.environ['USERNAME'].capitalize()        
         self.dt = Task(self.cc, self.userdefault, tclient = self.tclient, tproject = self.tproject) # dummy task for col names etc
         self.columns = self.dt.cols
         self.projectcol_ix = self.columns.index('tproject')
         self.taskcol_ix = self.columns.index('ttaskid') 
         self.clientcol_ix = self.columns.index('tclient')
         self.statuscol_ix = self.columns.index('tstatus')   
+        self.budgetdayscol_ix = self.columns.index('tbudgetdays')   
         self.responsiblecol_ix = self.columns.index('tresponsible')
         self.expectedcol_ix = self.columns.index('texpected')
-        self.progresscol_ix = self.columns.index('tprogress')
+        self.commentscol_ix = self.columns.index('tcomments')
         self.startedcol_ix = self.columns.index('tstarted')
         self.duecol_ix = self.columns.index('tdue')
         self.descriptioncol_ix = self.columns.index('tdescription')
         self.ownercol_ix = self.columns.index('powner')
-        self.user = os.environ['USERNAME']
+	self.user = os.environ['USERNAME'].capitalize()
         self.person_ix = self.people().index(self.userdefault)
         self.tl = TaskList(self)
         self.tl.getTasks(tresponsible=self.user)
         self.client_ix,self.project_ix, self.status_ix = -1,-1,-1
+	self.duein100 = False
+	self.butnduelabel = 'Show All Relevant Tasks'
         self.fillTasks()
 
     def fillTasks (self):
@@ -418,12 +524,27 @@ class ToDoManager(wx.Panel):
         # now build the list item
         self.TDlist = wx.ListCtrl(self.parent, -1, style = wx.LC_REPORT, size = (1600,400))
         first_col = self.dt.cols[0]
+	comments_col = len(self.dt.cols) - 2 
+	# relies upon the comments being the last column, which it should be, notice it is -2 as 
+	#  it is set in the enumerate(1:) code five lines down
         for col, text in enumerate (self.dt.heads) : 
             self.TDlist.InsertColumn(col, text) 
+	# now put the strings into the list control
         for rownum,task in enumerate(self.tl.data):
+	    colour,error = task.colour()
             index = self.TDlist.InsertStringItem(rownum+1, str(getattr(task,first_col)))
             for colnum, col in enumerate(self.dt.cols[1:]): 
-                self.TDlist.SetStringItem(index, colnum+1, str(getattr(task,col)))
+		column_text = str(getattr(task,col))
+		if (colnum == comments_col):
+		    if column_text == 'None':
+			column_text = '' 
+		    if error:
+		        if column_text:
+			    column_text = ': ' + column_text
+			column_text = error + column_text
+                self.TDlist.SetStringItem(index, colnum+1, column_text)
+	    if colour:
+		self.TDlist.SetItemBackgroundColour(index,colour)
         for col, text in enumerate(self.columns): 
             self.TDlist.SetColumnWidth(col, wx.LIST_AUTOSIZE_USEHEADER)
         self.TDlist.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.editTDFromList, self.TDlist)
@@ -440,6 +561,9 @@ class ToDoManager(wx.Panel):
         #
         # now the buttons for the to do list
         #
+	self.taskprojtext = 'Task View   '
+        #self.butnTaskProj = wx.Button(self.parent,-1,self.taskprojtext)
+	#self.parent.Bind(wx.EVT_BUTTON, self.task_projbtn,self.butnTaskProj)
         labPeeps = wx.StaticText(self.parent,-1,"Person")
         self.fldPeeps = wx.Choice(self.parent,-1,(85,18),choices = self.people())
         self.parent.Bind(wx.EVT_CHOICE,self.peep_choice,self.fldPeeps)
@@ -454,21 +578,22 @@ class ToDoManager(wx.Panel):
         self.parent.Bind(wx.EVT_CHOICE,self.status_choice,self.fldStatus)        
         butnAddTask = wx.Button(self.parent, -1, "Add Task ")
         self.parent.Bind(wx.EVT_BUTTON,  self.addtask, butnAddTask)
-        butnLoadss = wx.Button(self.parent, -1, "Load Spreadsheet ")
-        self.parent.Bind(wx.EVT_BUTTON,  self.loadss, butnLoadss)
-        butnProgress = wx.Button(self.parent, -1, "Progress Report ")
-        self.parent.Bind(wx.EVT_BUTTON,  self.progress_rpt, butnProgress)
-        butnNewClient = wx.Button(self.parent, -1, "Add Client ")
-        self.parent.Bind(wx.EVT_BUTTON,  self.addClientProject, butnNewClient)
-        butnNewProject = wx.Button(self.parent, -1, "Add Project ")
-        self.parent.Bind(wx.EVT_BUTTON,  self.addClientProject, butnNewProject)
+        butnVwReport = wx.Button(self.parent, -1, "View Report ")
+        self.parent.Bind(wx.EVT_BUTTON,  self.vwreport, butnVwReport)
+        butnXLReport = wx.Button(self.parent, -1, "Excel Report ")
+        self.parent.Bind(wx.EVT_BUTTON,  self.xlreport, butnXLReport)
+        self.butnDue100 = wx.Button(self.parent, -1, "First Time?")
+	self.butnDue100.SetLabel(self.butnduelabel)
+        self.parent.Bind(wx.EVT_BUTTON,  self.due100, self.butnDue100)
+#        butnNewProject = wx.Button(self.parent, -1, "Add Project ")
+#        self.parent.Bind(wx.EVT_BUTTON,  self.addClientProject, butnNewProject)
         
         #
         # now put all the to do widgets in one box sizer
         self.todoBtns = wx.StaticBox (self.parent, -1, 'Tasks Manager')
         self.todoBtnSizer = wx.StaticBoxSizer (self.todoBtns, wx.HORIZONTAL)
         for thing in [labPeeps, self.fldPeeps, labClient, self.fldClient, labProjs, self.fldProjs, labStatus, 
-                      self.fldStatus,butnAddTask,butnLoadss,butnProgress, butnNewClient, butnNewProject]:
+                      self.fldStatus, butnAddTask, self.butnDue100, butnVwReport, butnXLReport]:
             self.todoBtnSizer.Add(thing, 0, wx.ALL, 5)
         self.print_selection()
         if self.person_ix > -1:
@@ -549,9 +674,9 @@ See Phil if you want more explanation.'
                 self.td_conn.commit()
         dialog.Destroy()
 
-    def new_proj(self, projid, projdesc, owner):
-        sql = 'insert into Projects (pclient, pproject, powner, pstatus) values (?,?,?,?);'
-        self.td_cur.execute(sql,(projid, projdesc, owner, '2 In Progress'))
+#    def new_proj(self, projid, projdesc, owner):
+#        sql = 'insert into Projects (pclient, pproject, powner, pstatus) values (?,?,?,?);'
+#        self.td_cur.execute(sql,(projid, projdesc, owner, '2 In Preparation'))
 
     def new_task(self, row):
         sql_check = 'select ttaskid from tasks where tclient = ? and tproject = ? and ttaskid = ?'
@@ -563,27 +688,106 @@ See Phil if you want more explanation.'
             self.td_cur.execute(sql,(row['Client'],row['Project'],row['TaskId'],row['Description'],row['Due'],row['Due'],row['Responsible'], '1 Not Started'))
             return ''
 
-    def progress_rpt(self,event):
-        #msg = 'This function not developed yet.'
-        #rc = wx.MessageBox(msg, 'Progress Report', wx.OK | wx.ICON_INFORMATION)  
-        #pass
-        dialog = wx.FileDialog(None, "Choose a file", os.getcwd(),"","",wx.SAVE)
-        if dialog.ShowModal() == wx.ID_OK:
-            ssfil = dialog.GetPath()
-            msg = ''
-            heads = [i[0] + (i[1]).upper() + i[2:] for i in self.dt.cols] # capitalizes it in a sensible way
-            if self.tl.data:
-                ss_data = [OrderedDict((k,v) for k,v in zip(heads,[getattr(row,i) for i in self.dt.cols])) for row in self.tl.data]
-            else:
-                msg = 'No rows in task list.\n The report function writes all the rows selected to a spreadsheet'
-            try:
-                writeXL(ssfil, ss_data)
-                msg = str(len(self.tl.data)) + ' rows written to ' + ssfil
-            except:
-                msg = 'Error writing rows to spreadsheet - probably permissions or something.  \nSee Phil!'
-            rc = wx.MessageBox(msg , 'Report', wx.OK | wx.ICON_INFORMATION) 
+#    def progress_rpt(self,event):
+#        #msg = 'This function not developed yet.'
+#        #rc = wx.MessageBox(msg, 'Progress Report', wx.OK | wx.ICON_INFORMATION)  
+#        #pass
+#        dialog = wx.FileDialog(None, "Choose a file", os.getcwd(),"","",wx.SAVE)
+#        if dialog.ShowModal() == wx.ID_OK:
+#            ssfil = dialog.GetPath()
+#            msg = ''
+#            heads = [i[0] + (i[1]).upper() + i[2:] for i in self.dt.cols] # capitalizes it in a sensible way
+#            if self.tl.data:
+#                ss_data = [OrderedDict((k,v) for k,v in zip(heads,[getattr(row,i) for i in self.dt.cols])) for row in self.tl.data]
+ #           else:
+#                msg = 'No rows in task list.\n The report function writes all the rows selected to a spreadsheet'
+#            try:
+#                writeXL(ssfil, ss_data)
+#                msg = str(len(self.tl.data)) + ' rows written to ' + ssfil
+#            except:
+#                msg = 'Error writing rows to spreadsheet - probably permissions or something.  \nSee Phil!'
+#            rc = wx.MessageBox(msg , 'Report', wx.OK | wx.ICON_INFORMATION) 
         
-        
+    def vwreport(self,event):
+	# this assumes we are getting all projects of the type yyyiy actuarial Tasks
+        #msg = 'Report view not yet programmed.'
+        #rc = wx.MessageBox(msg, 'Error', wx.OK | wx.ICON_INFORMATION) 
+        #width_in_mm = width*1.797-2.4
+	html = self.reporthtml()
+        width_in_px = 600 #width_in_mm * 3.814
+        #height_in_mm = height * 8.675 - 2.697
+        #height_in_mm = min([height_in_mm, 270])
+        height_in_px = 300 #height_in_mm * 3.814
+	title = 'Status Report on ' + date.today().strftime("%m-%d-%Y")
+        frm = HTMLWindow(None, title, html, width_in_px, height_in_px)
+        frm.Show()
+
+    def reporthtml(self):
+        clientcols = getColHeads('clients', cursor)[0]
+	sql_client = 'select ' + ','.join(clientcols) + ' from clients'
+	cursor.execute(sql_client)
+	clients = cursor.fetchall()
+	year = str(date.today().year)
+	project = year + ' Actuarial Tasks'
+	taskcols = getColHeads('tasks', cursor)[0]
+	sql_tasks = "select " + ",".join(taskcols) + " from tasks where tproject = '{0}'".format(project)
+	tasks = cursor.execute(sql_tasks).fetchall()
+	# now we have the raw data let's make the tasks and data stores
+	task_data = OrderedDict()
+	for cli in clients:
+	    task_data[cli.clientcode] = OrderedDict(zip(clientcols,cli))
+	tskDict = {}
+	for t in tasks:
+	    tsk = Task(cc=None,user=None,tclient=t.tclient,tproject=t.tproject,taskdata=t)
+	    tskDict[(t.tclient,t.tdescription)] = tsk
+	task_order = ['8955-SSA','FundVal or Alloc','Acct Val BoY','Acct Val EoY','STMT','PBGC','5500','SAR/AFN','SB']
+        output = HTML.Table(header_row = clientcols + task_order)
+	for cli in clients:
+	    row = list(cli)
+	    for task in task_order:
+	        if (cli.clientcode,task) in tskDict:
+		    t = tskDict[(cli.clientcode, task)]
+		    colour = t.colour()[0]
+		    coloured_cell = HTML.TableCell(t.duedateout(), bgcolor = colour)
+		    row.append(coloured_cell)
+		else:
+		    row.append('No data')
+            output.rows.append(row)
+	keys = t.return_constants()
+	k = HTML.Table(header_row=['Key'])
+	for key in keys:
+	    cell = HTML.TableCell(key[1],bgcolor=key[0])
+	    k.rows.append([cell])
+	
+	return str(k) + str(output)
+
+
+    def xlreport (self, event):
+	datestr = date.today().strftime("%m-%d-%Y")
+        dlg = wx.FileDialog(
+            self, message="Export html filename.", defaultDir="", 
+            defaultFile="taskdata_"+datestr+".html", wildcard="*.html*", style=wx.SAVE
+            )
+        if dlg.ShowModal() == wx.ID_OK:
+            self.htmlfileName = dlg.GetPath()
+            outf = open(self.htmlfileName,'w')
+            outf.write(self.reporthtml())
+            outf.close()
+        dlg.Destroy()
+        msg = 'Excel File Created.'
+        rc = wx.MessageBox(msg, 'Error', wx.OK | wx.ICON_INFORMATION)  
+
+    def due100(self,event):
+        if self.duein100:
+	    self.duein100 = False
+	    self.butnduelabel = 'Show All Relevant Tasks'
+        else:
+	    self.duein100 = True
+	    self.butnduelabel = 'Tasks Due in 100 Days'
+	self.butnDue100.SetLabel(self.butnduelabel)
+	self.Refresh()
+	self.getSelections()
+	
 
     def print_selection(self):
         nothing = True # there's nihilism for you
@@ -630,7 +834,7 @@ See Phil if you want more explanation.'
         else:
             self.tstatus = None
         self.tprojectlist = self.projects(self.tclient)
-        self.tl.getTasks(tclient = self.tclient, tproject = self.tproject, tresponsible = self.user, tstatus = self.tstatus)
+        self.tl.getTasks(tduein100 = self.duein100, tclient = self.tclient, tproject = self.tproject, tresponsible = self.user, tstatus = self.tstatus)
         self.fillTasks()
 
     def addClientProject(self, event):
@@ -656,7 +860,7 @@ See Phil if you want more explanation.'
         return [c[0] for c in clients] + ['unselect']
 
     def statuses(self): # list of status codes
-        self.td_cur.execute('select StatusDescription from Status')
+        self.td_cur.execute('select sStatusDescription from Status')
         return [i[0] for i in self.td_cur.fetchall()] + ['unselect']
 
     def peep_choice(self,event):
@@ -671,6 +875,13 @@ See Phil if you want more explanation.'
     def status_choice(self,event):
         self.getSelections()
 
+    def task_projbtn(self,event):
+	if self.taskprojtext == 'Task View   ':
+	    self.taskprojtext = 'Project View'
+        else:
+	    self.taskprojtext = 'Task View   '
+	self.butnTaskProj.SetLabel(self.taskprojtext)
+
     def OnRightClick(self, event):
         if not hasattr(self,"popupId1"):
             self.popupId1 = wx.wx.NewId()
@@ -683,16 +894,20 @@ See Phil if you want more explanation.'
             self.popupId8 = wx.wx.NewId() 
             self.popupId9 = wx.wx.NewId()             
             self.popupId10 = wx.wx.NewId() 
+            self.popupId11 = wx.wx.NewId() 
+            self.popupId12 = wx.wx.NewId() 
             self.parent.Bind(wx.EVT_MENU, self.onPopUpOne, id = self.popupId1)
             self.parent.Bind(wx.EVT_MENU, self.onPopUpTwo, id = self.popupId2)            
             self.parent.Bind(wx.EVT_MENU, self.onPopUpThree, id = self.popupId3)
             self.parent.Bind(wx.EVT_MENU, self.onPopUpFour, id = self.popupId4)            
             self.parent.Bind(wx.EVT_MENU, self.onPopUpFive, id = self.popupId5)
             self.parent.Bind(wx.EVT_MENU, self.onPopUpSix, id = self.popupId6)            
-            #self.parent.Bind(wx.EVT_MENU, self.onPopUpSeven, id = self.popupId7)
+            self.parent.Bind(wx.EVT_MENU, self.onPopUpSeven, id = self.popupId7) 
             self.parent.Bind(wx.EVT_MENU, self.onPopUpEight, id = self.popupId8)
-            self.parent.Bind(wx.EVT_MENU, self.onPopUpNine, id = self.popupId9)
+            #self.parent.Bind(wx.EVT_MENU, self.onPopUpNine, id = self.popupId9)
             self.parent.Bind(wx.EVT_MENU, self.onPopUpTen, id = self.popupId10)
+            self.parent.Bind(wx.EVT_MENU, self.onPopUpEleven, id = self.popupId11)
+            self.parent.Bind(wx.EVT_MENU, self.onPopUpTwelve, id = self.popupId12)
             # now build the sub menu
             users = self.people()
             self.user_dick = OrderedDict()
@@ -704,16 +919,18 @@ See Phil if you want more explanation.'
         for userid, user in self.user_dick.iteritems():
             usermenu.Append(userid,user)        
         menu = wx.Menu()
-        menu.Append(self.popupId1,"Change Status - 1 Not Started")
-        menu.Append(self.popupId2,"Change Status - 2 In Progress")   
-        menu.Append(self.popupId3,"Change Status - 3 In Checking")           
-        menu.Append(self.popupId4,"Change Status - 4 In Rework")   
-        menu.Append(self.popupId5,"Change Status - 5 Complete")   
-        menu.Append(self.popupId6,"Change Status - 6 Cancelled")
-        menu.AppendMenu(self.popupId7,"Reassign",usermenu)
-        menu.Append(self.popupId8,"Add a week to completion date")  
-        menu.Append(self.popupId9,"Update progress and issues")          
-        menu.Append(self.popupId10,"Show History")   
+        menu.Append(self.popupId1,"Change Status - 0 On Hold")
+        menu.Append(self.popupId2,"Change Status - 1 Not Started")
+        menu.Append(self.popupId3,"Change Status - 2 In Preparation")   
+        menu.Append(self.popupId4,"Change Status - 3 Checking")           
+        menu.Append(self.popupId5,"Change Status - 4 Edits")   
+        menu.Append(self.popupId6,"Change Status - 5 In Review")   
+        menu.Append(self.popupId7,"Change Status - 6 Complete")
+        menu.Append(self.popupId8,"Change Status - 7 Cancelled")
+        menu.AppendMenu(self.popupId9,"Reassign",usermenu)
+        menu.Append(self.popupId10,"Add a week to completion date")  
+        menu.Append(self.popupId11,"Update Comments")          
+        menu.Append(self.popupId12,"Show History")   
         self.parent.PopupMenu(menu)
         menu.Destroy()        
 
@@ -722,6 +939,7 @@ See Phil if you want more explanation.'
         self.task.tstatus = new_status
         self.TDlist.SetStringItem(self.task_ix,self.statuscol_ix,new_status)
         self.change_history(old_status, new_status, 'Tstatus')
+        self.fillTasks()
 
     def onPopUpUser(self, event):
         new_doer = self.user_dick[event.Id]
@@ -732,26 +950,32 @@ See Phil if you want more explanation.'
         #self.fillTasks()
 
     def onPopUpOne(self,event):
-        self.popupStatusChange('1 Not Started')
+        self.popupStatusChange('0 On Hold')
 
     def onPopUpTwo(self,event):
-        self.popupStatusChange("2 In Progress")
+        self.popupStatusChange('1 Not Started')
 
     def onPopUpThree(self,event):
-        self.popupStatusChange("3 In Checking")
+        self.popupStatusChange("2 In Preparation")
 
     def onPopUpFour(self,event):
-        self.popupStatusChange("4 In Rework")
+        self.popupStatusChange("3 Checking")
 
     def onPopUpFive(self,event):
-        self.popupStatusChange("5 Complete")
+        self.popupStatusChange("4 Edits")
 
     def onPopUpSix(self,event):
-        self.popupStatusChange("6 Cancelled")
+        self.popupStatusChange("5 In Review")
 
-    # onPopUpSeven is just the submenu - see above
+    def onPopUpSeven(self,event):
+        self.popupStatusChange("6 Complete")
 
     def onPopUpEight(self,event):
+        self.popupStatusChange("7 Cancelled")
+
+# onPopUpNine is just the submenu - see above
+
+    def onPopUpTen(self,event):
         old_date = self.task.texpected
         if old_date:
             new_date = old_date + timedelta(7)
@@ -761,21 +985,22 @@ See Phil if you want more explanation.'
         self.task.texpected = new_date
         self.TDlist.SetStringItem(self.task_ix,self.expectedcol_ix,datetime.strftime(new_date,"%Y-%m-%d"))
         self.change_history(str(old_date), str(new_date), 'tExpected')
+        self.fillTasks()
 
-    def onPopUpNine(self,event):
-        if not self.task.tprogress:
-            self.task.tprogress = ''
-        dlg = wx.TextEntryDialog(self, 'Edit the text if needed','Progress Report',
+    def onPopUpEleven(self,event):
+        if not self.task.tcomments:
+            self.task.tcomment = ''
+        dlg = wx.TextEntryDialog(self, 'Edit the text if needed','Comments',
                                  style=wx.TE_MULTILINE|wx.OK|wx.CANCEL)
-        dlg.SetValue(self.task.tprogress)
+        dlg.SetValue(unicode(self.task.tcomments))
         if dlg.ShowModal() == wx.ID_OK:
-            new_progress = dlg.GetValue()
-            self.task.tprogress = new_progress
-            self.change_history(self.task.tprogress, new_progress, 'tProgress', write_log = False)
-            self.TDlist.SetStringItem(self.task_ix,self.progresscol_ix,new_progress)
+            new_comments = dlg.GetValue()
+            self.task.tcomments = new_comments
+            self.change_history(self.task.tcomments, new_comments, 'tComments', write_log = False)
+            self.TDlist.SetStringItem(self.task_ix,self.commentscol_ix,new_comments)
         dlg.Destroy()
 
-    def onPopUpTen(self, event):
+    def onPopUpTwelve(self, event):
         sql = 'select hWho, hWhen, haction from history where hclient = ? and hproject = ? and htaskid = ? order by hWhen'
         vals = (self.task.tclient, self.task.tproject, self.task.ttaskid)
         self.td_cur.execute(sql, vals)

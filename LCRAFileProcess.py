@@ -4,6 +4,7 @@ import xlwt
 import pyodbc
 import MySQLdb
 import encodings
+from utilities import ConnString
 
 colHeads=['socsec', 'paydate', 'eename', 'address1', 'city', 'state', 'zip', 'loccode', \
           'birthdate', 'hiredate', 'sex', 'paycode', 'fullpart', 'regproj', 'sickleave', \
@@ -30,13 +31,11 @@ update_sqlweb = 'update tbmonthly set ' + " = %s,".join(colHeadsWebnokey) + "=%s
 check_sqlweb = 'select pid from tbmonthly where pid = %s and paydate = %s;'
 #
 # Connection to monthly database on main database server
-cstMonthly = 'DRIVER={SQL Server Native Client 10.0}; SERVER=RWDB1;DATABASE=ClientMonthly;UID=RWUser; PWD=RuddWisd0m'
-cn_month = pyodbc.connect(cstMonthly)
+cn_month = pyodbc.connect(ConnString(9))
 curs_month = cn_month.cursor()
 #
 #  Connection to Data Warehouse to do checks on valid people and so on
-cstWarehouse = 'DRIVER={SQL Server Native Client 10.0}; SERVER=RWDB1;DATABASE=Warehouse;UID=RWUser; PWD=RuddWisd0m'
-cn_wh = pyodbc.connect(cstWarehouse)
+cn_wh = pyodbc.connect(ConnString(3))
 curs_wh = cn_wh.cursor()
 #
 # Connection to website database using MySQL 
@@ -143,13 +142,13 @@ def load_table():
         curs_month.execute(insert_sql,[line[i] for i in colHeads])
         ct += 1
         if ct % 10000 == 0:
-            print ct
+            #print ct
             cn_month.commit()
     cn_month.commit()
             
 def load_month_warehouse(filename, check=True):
     #first check everyone is in tbMember
-    print filename
+    #print filename
     sql = """select mssn, mpid from tbmember
                  inner join tbbhsnapshot on bhmid = mid
                  where 
@@ -289,12 +288,13 @@ def find_duplicate_keys():
     sql = 'select socsec, paydate from lcramonthlypay order by socsec asc, paydate asc'
     curs_month.execute(sql)
     data = curs_month.fetchall()
-    print 'got data'
+    #print 'got data'
     test = data.pop(0)
     for i in range(len(data)):
         newtest = data.pop(0)
         if newtest == test:
-            print newtest
+	    pass
+            #print newtest
         else:
             test = newtest
 
@@ -348,6 +348,7 @@ def latestpay(table):
         cursor = curs_month
     elif table == 'tbmonthly':
         cursor = cursor_web
+	#print cursor.connection.port
     sql = 'select MAX(paydate) from ' + table
     cursor.execute(sql)
     dt = cursor.fetchone()[0]

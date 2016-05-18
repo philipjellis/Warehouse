@@ -1,15 +1,17 @@
 import pyodbc
 from decimal import Decimal
-import datetime
+import datetime, time
 import sys
 #import locale
 from collections import namedtuple
 from string import ascii_letters
 import os
 import wx
+from pubsub import pub
+
 # some constants
 """ HERE IS THE TEST VARIABLE _ CHANGE THIS TO MOVE TO TEST or PROD """
-test = False
+test = False # set by listener1
 
 """  End of Test variable! """
 tbPersonKey = ['pId']
@@ -61,23 +63,49 @@ ConnStrings contains all the connection strings.   Open the file to see how it i
 In brief line 1 is normal test, 3 is normal prod, 5 is view create test, 7 is view create prod
 Normal use of this program in production requires both line 3 and line 7 - they are returned by the two connectionString functions below
 """
+
+def listener3(arg1):
+    global test
+    #print 'Listener 3 got ', arg1
+    if arg1 == 'Prod':
+	test = False
+	#print 'Now in Prod'
+    else:
+	test = True
+	#print 'Now in Test'
+
+pub.subscribe(listener3,'Production')
+
 def ConnString (lineNum): 
-    CstFilName = 'l:\\warehouse\lz\connStrings.txt'
+    CstFilName = 'l:\\warehouse\lz\connStringsFileDSN.txt'
     CstF = open(CstFilName,'r')
     ConnStrings = CstF.readlines()
     CstF.close()
-    return ConnStrings[lineNum].strip()
+    return eval(ConnStrings[lineNum].strip())
 
 def accP2(): # simple read access
     return pyodbc.connect(connectionString())
 
-def connectionString(): 
+def connectionString():
+    # this just gets the connection string for regular access to the warehouse - test or prod
     if test :
         CS = ConnString(1)
+	#print 'getting the test connection', time.strftime('%H:%M:%S%p %Z')
     else:
         CS = ConnString(3)
+	#print 'getting the prod connection', time.strftime('%H:%M:%S%p %Z')
     #print CS, ' normal connection string'
     return CS
+
+def monthlyString():
+    # this gets the monthly database connection string for either test or prod
+    if test:
+	CS = ConnString(13)
+    else:
+	CS = ConnString(9)
+    print 'CS monthly',CS
+    return CS
+
 
 def connStringViewCreate():
     if test :
@@ -227,4 +255,19 @@ class HTMLWindow(wx.Frame):
         html = wx.html.HtmlWindow(self)
         if "gtk2" in wx.PlatformInfo:
             html.SetStandardFonts()
-        html.SetPage(text)  
+        html.SetPage(text) 
+
+def pydate2wxdate(date):
+     assert isinstance(date, (datetime.datetime, datetime.date))
+     tt = date.timetuple()
+     dmy = (tt[2], tt[1]-1, tt[0])
+     return wx.DateTimeFromDMY(*dmy)
+
+def wxdate2pydate(date):
+     assert isinstance(date, wx.DateTime)
+     if date.IsValid():
+          ymd = map(int, date.FormatISODate().split('-'))
+          return datetime.date(*ymd)
+     else:
+          return None
+
